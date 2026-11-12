@@ -1,0 +1,15 @@
+node_modules/
+package-lock.json
+artifacts/
+*.tgz
+dist/
+coverage/
+.cache/
+.DS_Store
+*.swp
+*.swo
+
+# Local validation only; never stage or commit tests.
+tests/
+test/
+evidence/
