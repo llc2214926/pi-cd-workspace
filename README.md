@@ -4,7 +4,7 @@
 
 An independent Pi extension for switching workspaces: keep the current session, start fresh, or open Pi's native resume picker. Extracted from pi-file-sidebar, including its column picker, mouse navigation, position bars, long-name bubbles and bilingual interface.
 
-Requires Node **>=22.19.0** and stable Pi **>=1.4.0** (build metadata accepted, prereleases rejected). Development baseline: Pi **1.5.0**, with **1.4.0** as the compatibility target. Version acceptance does not guarantee compatibility with every future host or terminal. Fullscreen and regular TUI are supported; RPC/print/JSON remain silent. No build step or runtime dependencies: Pi loads `extensions/index.ts` and supplies its SDK/TUI peers.
+Requires Node **>=22.19.0** and stable Pi **>=1.4.0** (build metadata accepted, prereleases rejected). Development baseline: Pi **1.5.0**, with **1.5.0 / 1.5.2** verified and **1.4.0** retained for backward compatibility; later stable hosts are not version-pinned out. Version acceptance does not guarantee compatibility with every future host or terminal. Fullscreen and regular TUI are supported; RPC/print/JSON remain silent. No build step or runtime dependencies: Pi loads `extensions/index.ts` and supplies its SDK/TUI peers.
 
 ## Installation and migration
 
@@ -108,11 +108,11 @@ node --import tsx --test tests/*.test.ts
 npm pack --dry-run
 ```
 
-Run against Pi 1.5.0 and an isolated Pi 1.4.0 dependency tree. Both versions pass source/test type checks and local regressions for filesystem/session failure paths, picker rendering/input, and independent/co-loaded behavior in fullscreen and regular modes. The UI checks use Pi's real loader/components with an in-memory terminal and simulated command context. Unpacked packages also load independently and in either order without repository dependencies.
+Run against isolated Pi 1.5.0, 1.5.2, and 1.4.0 dependency trees. All three versions pass source/test type checks and 103 local regressions for filesystem/session failure paths, picker rendering/input, and independent/co-loaded behavior in fullscreen and regular modes. The UI checks use Pi's real loader/components with an in-memory terminal and simulated command context. A real InteractiveMode with an in-memory terminal also passes four-extension co-loading in two orders, picker cancellation, reload, and session replacement on all three versions. Unpacked packages also load independently and in either order without repository dependencies.
 
 These checks do not replace formal human real-terminal acceptance, which remains pending. The latest background PTY attempt was blocked before Pi started (`os.openpty`: `Operation not permitted`); actual terminal session replacement/reload has not been revalidated after this split.
 
-Manual checklist on both hosts:
+Manual checklist on all three hosts:
 
 - Each extension alone, both load orders, fullscreen/regular, 80/120 columns and narrow/short resizing; no duplicate commands or focus/wheel leakage.
 - All three modes, same directory/aliases/links and cross-directory targets, spaces/Chinese/quotes/percent, missing/unreadable targets, in-memory restrictions, native resume select/cancel.
