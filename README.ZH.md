@@ -8,14 +8,14 @@
 
 ## 安装与迁移
 
-注册本地源码包：
+直接从 GitHub 安装：
 
 ```bash
-pi install /绝对路径/pi-cd-workspace
+pi install git:github.com/llc2214926/pi-cd-workspace
 # 然后 /reload 或重启 Pi。
 ```
 
-临时加载源码，不注册包、不加载其他已安装扩展：
+本地开发时，可在源码仓库中临时加载，不注册包、不加载其他已安装扩展：
 
 ```bash
 pi --no-extensions -e ./extensions/index.ts --tui-mode fullscreen

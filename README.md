@@ -8,14 +8,14 @@ Requires Node **>=22.19.0** and stable Pi **>=1.4.0** (build metadata accepted, 
 
 ## Installation and migration
 
-From this repository, register the local package:
+Install directly from GitHub:
 
 ```bash
-pi install /absolute/path/to/pi-cd-workspace
+pi install git:github.com/llc2214926/pi-cd-workspace
 # Then /reload or restart Pi.
 ```
 
-Try the source without registering or loading other installed extensions:
+For local development, try the source from a checkout without registering it or loading other installed extensions:
 
 ```bash
 pi --no-extensions -e ./extensions/index.ts --tui-mode fullscreen
