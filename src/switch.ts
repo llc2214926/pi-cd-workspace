@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { SessionManager, type ExtensionContext, type FileEntry, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { WorkspaceError } from "./i18n.ts";
+import type { WorkspaceCommandContext } from "./host.ts";
 
 // 会话文件逻辑不操作 UI；宿主切换和新上下文副作用集中在 cd-command.ts。
 export function validateTarget(picked: string, current: string, options: { allowCurrent?: boolean } = {}): string {
@@ -22,8 +23,9 @@ export function isCurrentDirectory(target: string, current: string): boolean {
   return target === actualCurrent;
 }
 
-export function requireIdle(ctx: Pick<ExtensionContext, "isIdle" | "hasPendingMessages">): boolean {
-  return ctx.isIdle() && !ctx.hasPendingMessages();
+export function requireIdle(ctx: Pick<WorkspaceCommandContext, "isIdle" | "hasPendingMessages" | "isBashRunning">): boolean {
+  if (!ctx.isBashRunning) throw new WorkspaceError("hostUpgradeRequired");
+  return ctx.isIdle() && !ctx.hasPendingMessages() && !ctx.isBashRunning();
 }
 
 // Pi 1.4.0 的只读类型未暴露这两个查询，但实际提供的是 SessionManager。
@@ -62,17 +64,38 @@ export class SessionPreparationError extends Error {
 }
 
 export function prepareSessionMove(manager: SessionManager, target: string): { destination: string } {
-  const header = manager.getHeader();
-  if (!header) throw new WorkspaceError("sessionHeaderMissing");
+  const entries = sessionMoveEntries(manager, target);
   const destinationManager = SessionManager.create(target,
     manager.usesDefaultSessionDir() ? undefined : manager.getSessionDir(), { id: manager.getSessionId() });
+  return writeSessionSnapshot(destinationManager, entries, manager.getSessionFile());
+}
+
+function sessionMoveEntries(manager: ExtensionContext["sessionManager"], target: string): FileEntry[] {
+  const header = manager.getHeader();
+  if (!header) throw new WorkspaceError("sessionHeaderMissing");
   const marker: SessionEntry = {
     type: "custom", id: randomUUID(), parentId: manager.getLeafId(), timestamp: new Date().toISOString(),
     customType: "cd-picker", data: { from: manager.getCwd(), to: target },
   };
   // 保留全部分支；marker 挂在当前 leaf（包括 null），而不是最近写入的废弃分支。
-  const entries: FileEntry[] = [{ ...header, cwd: target }, ...manager.getEntries(), marker];
-  return writeSessionSnapshot(destinationManager, entries, manager.getSessionFile());
+  return [{ ...header, cwd: target }, ...manager.getEntries(), marker];
+}
+
+// 仅由宿主在 shutdown 保存结束、目标尚未加载时同步调用；失败不覆盖先前可恢复的快照。
+export function finalizeSessionMove(manager: ExtensionContext["sessionManager"], target: string, destination: string): void {
+  const content = `${sessionMoveEntries(manager, target).map((entry) => JSON.stringify(entry)).join("\n")}\n`;
+  const temporary = `${destination}.${randomUUID()}.cd-pending`;
+  const fd = fs.openSync(temporary, "wx", 0o600);
+  try {
+    try { fs.writeFileSync(fd, content, "utf8"); fs.fsyncSync(fd); }
+    finally { fs.closeSync(fd); }
+    fs.renameSync(temporary, destination);
+  } catch (error) {
+    let abandoned: string;
+    try { abandoned = abandonDestination(temporary); }
+    catch (cleanupError) { throw new SessionPreparationError(temporary, error, cleanupError); }
+    throw new SessionPreparationError(abandoned, error);
+  }
 }
 
 export function prepareEmptySession(manager: SessionManager, target: string): { destination: string; sessionId: string } {

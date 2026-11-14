@@ -1,8 +1,8 @@
-import { VERSION, type ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import { VERSION } from "@earendil-works/pi-coding-agent";
 import { DirPicker, shortenPath } from "./dir-picker.ts";
 import { describeError, getMessages, WorkspaceError, type Language } from "./i18n.ts";
-import { abandonDestination, archiveSource, isCurrentDirectory, persistentManager, prepareEmptySession, prepareSessionMove, requireIdle, SessionPreparationError, validateTarget } from "./switch.ts";
-import { canOpenDirectoryUI, openNativeResume } from "./host.ts";
+import { abandonDestination, archiveSource, finalizeSessionMove, isCurrentDirectory, persistentManager, prepareEmptySession, prepareSessionMove, requireIdle, SessionPreparationError, validateTarget } from "./switch.ts";
+import { canOpenDirectoryUI, openNativeResume, type WorkspaceCommandContext } from "./host.ts";
 import { isSupportedPiVersion } from "./compat.ts";
 import { displayText } from "./display.ts";
 import { DoubleBorder } from "./frame.ts";
@@ -20,16 +20,27 @@ export function decodeCdTarget(args: string): string | undefined {
 
 export type DirectoryMode = "keep" | "new" | "resume";
 
+// 仅插值经过清洗；已格式化的恢复提示不可再次转义模板换行。
+class SwitchError extends Error {}
+
+function throwSnapshotFailure(error: unknown, source: string, language: Language): never {
+  if (!(error instanceof SessionPreparationError)) throw error;
+  const text = getMessages(language).switch, path = displayText(error.destination);
+  throw new SwitchError(`${text.failed(displayText(describeError(error.cause, language)))}\n${text.recovery(displayText(source), path)}${
+    error.cleanupError ? `\n${text.abandonFailed(path, displayText(describeError(error.cleanupError, language)))}` : ""}`, { cause: error });
+}
+
 // 所有替换后的 ctx 副作用必须在 withSession 中；抛错后只能生成数据错误交给宿主报告。
-export async function performSwitch(ctx: ExtensionCommandContext, picked: string,
+export async function performSwitch(ctx: WorkspaceCommandContext, picked: string,
   options: { captureDraft: boolean; language: Language; mode?: DirectoryMode }): Promise<"switched" | "cancelled"> {
   const language = options.language, text = getMessages(language).switch, mode = options.mode ?? "keep";
   if (!requireIdle(ctx)) throw new WorkspaceError("agentBusy");
+  if (!ctx.switchSessionWhenIdle) throw new WorkspaceError("hostUpgradeRequired");
   const target = validateTarget(picked, ctx.cwd, { allowCurrent: mode !== "keep" });
   if (isCurrentDirectory(target, ctx.cwd)) {
     if (mode === "resume") { openNativeResume(ctx); return "switched"; }
     // 同目录与 /new 相同，不建立目录切换快照，也不设置父会话或恢复草稿。
-    const result = await ctx.newSession();
+    const result = await ctx.newSession({ requireIdle: true });
     return result.cancelled ? "cancelled" : "switched";
   }
   const manager = persistentManager(ctx), source = manager.getSessionFile()!;
@@ -40,19 +51,17 @@ export async function performSwitch(ctx: ExtensionCommandContext, picked: string
     if (mode === "keep") { ({ destination } = prepareSessionMove(manager, target)); }
     else { ({ destination, sessionId } = prepareEmptySession(manager, target)); }
   }
-  catch (error) {
-    if (error instanceof SessionPreparationError) {
-      throw new Error(displayText(`${text.failed(describeError(error.cause, language))}\n${text.recovery(source, error.destination)}${
-        error.cleanupError ? `\n${text.abandonFailed(error.destination, describeError(error.cleanupError, language))}` : ""}`), { cause: error });
-    }
-    throw error;
-  }
+  catch (error) { throwSnapshotFailure(error, source, language); }
   let takenOver = false, sourceRecovery = source, recoveryPath = destination;
   let abandonmentAttempted = false;
   try {
     // Pi 的交互层遇到致命 runtime 错误可能直接 exit；提前显示恢复路径，不能承诺 catch 总能执行。
-    ctx.ui.notify(displayText(mode === "keep" ? text.switching(source, destination) : text.starting(source, destination)), "info");
-    const result = await ctx.switchSession(destination, {
+    ctx.ui.notify(mode === "keep" ? text.switching(displayText(source), displayText(destination)) : text.starting(displayText(source), displayText(destination)), "info");
+    const result = await ctx.switchSessionWhenIdle(destination, {
+      prepareSnapshot: mode === "keep" ? (settled) => {
+        try { finalizeSessionMove(settled, target, destination); }
+        catch (error) { throwSnapshotFailure(error, source, language); }
+      } : undefined,
       withSession: async (fresh) => {
         if (fresh.cwd !== target || fresh.sessionManager.getSessionFile() !== destination
           || fresh.sessionManager.getSessionId() !== sessionId) throw new WorkspaceError("sessionTakeoverFailed");
@@ -62,12 +71,12 @@ export async function performSwitch(ctx: ExtensionCommandContext, picked: string
           try {
             const archive = archiveSource(source);
             sourceRecovery = archive.backup ?? source;
-            if (archive.sourceRetained) fresh.ui.notify(displayText(text.sourceRetained(source, archive.backup!)), "warning");
-          } catch (error) { fresh.ui.notify(displayText(text.archiveFailed(source, describeError(error, language))), "warning"); }
+            if (archive.sourceRetained) fresh.ui.notify(text.sourceRetained(displayText(source), displayText(archive.backup!)), "warning");
+          } catch (error) { fresh.ui.notify(text.archiveFailed(displayText(source), displayText(describeError(error, language))), "warning"); }
         }
         if (draft !== undefined) {
           try { fresh.ui.setEditorText(draft); }
-          catch (error) { fresh.ui.notify(displayText(text.draftFailed(describeError(error, language))), "warning"); }
+          catch (error) { fresh.ui.notify(text.draftFailed(displayText(describeError(error, language))), "warning"); }
         }
         fresh.ui.notify(mode === "keep" ? text.done(shortenPath(target)) : text.started(shortenPath(target)), "info");
         if (mode === "resume") {
@@ -83,7 +92,7 @@ export async function performSwitch(ctx: ExtensionCommandContext, picked: string
       abandonmentAttempted = true;
       recoveryPath = abandonDestination(destination);
       // cancelled 表示旧 runtime 未被替换，此处旧 ctx 仍有效。
-      ctx.ui.notify(displayText(`${text.cancelled}\n${text.abandoned(recoveryPath)}`), "info");
+      ctx.ui.notify(`${text.cancelled}\n${text.abandoned(displayText(recoveryPath))}`, "info");
       return "cancelled";
     }
     if (!takenOver) throw new WorkspaceError("sessionTakeoverFailed");
@@ -93,11 +102,12 @@ export async function performSwitch(ctx: ExtensionCommandContext, picked: string
     // 接管后的异常不能移动正在使用的新会话文件；失败的归档也不盲目重试。
     if (!takenOver && !abandonmentAttempted) {
       try { recoveryPath = abandonDestination(destination); }
-      catch (failure) { cleanup = `\n${text.abandonFailed(destination, describeError(failure, language))}`; }
+      catch (failure) { cleanup = `\n${text.abandonFailed(displayText(destination), displayText(describeError(failure, language)))}`; }
     } else if (abandonmentAttempted && recoveryPath === destination) {
-      cleanup = `\n${text.abandonFailed(destination, describeError(error, language))}`;
+      cleanup = `\n${text.abandonFailed(displayText(destination), displayText(describeError(error, language)))}`;
     }
-    throw new Error(displayText(`${text.failed(describeError(error, language))}\n${text.recovery(sourceRecovery, recoveryPath)}${cleanup}`), { cause: error });
+    const detail = error instanceof SwitchError ? error.message : displayText(describeError(error, language));
+    throw new SwitchError(`${text.failed(detail)}\n${text.recovery(displayText(sourceRecovery), displayText(recoveryPath))}${cleanup}`, { cause: error });
   }
 }
 
@@ -115,7 +125,7 @@ export class DirectoryCommands {
   prompt(start: boolean): void { this.blocked = start; }
   redraw(): void { this.redrawPicker?.(); }
 
-  async command(args: string, ctx: ExtensionCommandContext, mode: DirectoryMode = "keep"): Promise<void> {
+  async command(args: string, ctx: WorkspaceCommandContext, mode: DirectoryMode = "keep"): Promise<void> {
     if (this.disposed || ctx.mode !== "tui") return;
     const warn = (error: unknown) => ctx.ui.notify(displayText(describeError(error, this.language())), "warning");
     if (!isSupportedPiVersion(VERSION) || !ctx.hasUI) { warn(new WorkspaceError("switchTuiOnly")); return; }
@@ -151,7 +161,7 @@ export class DirectoryCommands {
       await performSwitch(ctx, target, { captureDraft: mode === "keep", language: switchLanguage, mode });
       // 不在这里通知，也不再读取 ctx；旧 runtime 已失效。
     } catch (error) {
-      if (switching) throw new Error(displayText(describeError(error, switchLanguage)), { cause: error });
+      if (switching) throw error instanceof SwitchError ? error : new Error(displayText(describeError(error, switchLanguage)), { cause: error });
       if (!this.disposed) warn(error);
     } finally {
       this.busy = false;

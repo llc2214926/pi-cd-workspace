@@ -36,7 +36,8 @@ const zh = {
     loading: "读取中…",
   },
   errors: {
-    agentBusy: "Agent 正在处理消息；请等待或取消待发送消息后重试",
+    agentBusy: "Agent、shell 或待发送消息尚未完成；请等待后重试",
+    hostUpgradeRequired: "此 Pi 缺少安全切换接口；请使用带 patches/pi-1.5.2-workspace-switch.patch 的宿主。未切换会话。",
     hostBusy: "主界面正忙或被模态占用；请返回主输入框后重试",
     switchBusy: "工作目录切换进行中，请稍后",
     switchTuiOnly: "目录切换需要 Pi >=1.4.0 交互式 TUI",
@@ -87,7 +88,8 @@ const en: typeof zh = {
     loading: "Loading…",
   },
   errors: {
-    agentBusy: "Agent is processing messages; wait or cancel pending messages before retrying",
+    agentBusy: "Agent, shell, or queued messages are still active; wait before retrying",
+    hostUpgradeRequired: "This Pi lacks safe session switching. Use a host with patches/pi-1.5.2-workspace-switch.patch. No session was switched.",
     hostBusy: "The host is busy or a modal is open; return to the main editor and retry",
     switchBusy: "A working directory switch is already in progress",
     switchTuiOnly: "Directory switching requires Pi >=1.4.0 interactive TUI",

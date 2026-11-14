@@ -1,7 +1,17 @@
-import { VERSION, type CustomEditor, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { VERSION, type CustomEditor, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { isSupportedPiVersion } from "./compat.ts";
 import { WorkspaceError } from "./i18n.ts";
+
+// 补丁接口是可选能力；旧 SDK 仍可加载扩展，但不能静默退回不安全的替换。
+export interface WorkspaceCommandContext extends ExtensionCommandContext {
+  isBashRunning?(): boolean;
+  newSession(options?: NonNullable<Parameters<ExtensionCommandContext["newSession"]>[0]> & { requireIdle?: boolean }): Promise<{ cancelled: boolean }>;
+  switchSessionWhenIdle?(sessionPath: string, options?: {
+    prepareSnapshot?: (source: ExtensionContext["sessionManager"]) => void;
+    withSession?: NonNullable<Parameters<ExtensionCommandContext["switchSession"]>[1]>["withSession"];
+  }): Promise<{ cancelled: boolean }>;
+}
 
 type NativeTUI = TUI & { getFocusedComponent(): Component | null };
 

@@ -1,0 +1,646 @@
+diff --git a/packages/coding-agent/src/core/agent-session-runtime.ts b/packages/coding-agent/src/core/agent-session-runtime.ts
+index 50ce902..f880a5c 100644
+--- a/packages/coding-agent/src/core/agent-session-runtime.ts
++++ b/packages/coding-agent/src/core/agent-session-runtime.ts
+@@ -12,7 +12,7 @@ import type {
+ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+ import type { CreateAgentSessionResult } from "./sdk.ts";
+ import { assertSessionCwdExists } from "./session-cwd.ts";
+-import { SessionManager } from "./session-manager.ts";
++import { type ReadonlySessionManager, SessionManager } from "./session-manager.ts";
+ 
+ /**
+  * Result returned by runtime creation.
+@@ -164,7 +164,11 @@ export class AgentSessionRuntime {
+ 		return { cancelled: result?.cancel === true };
+ 	}
+ 
+-	private async teardownCurrent(reason: SessionShutdownEvent["reason"], targetSessionFile?: string): Promise<void> {
++	private async teardownCurrent(
++		reason: SessionShutdownEvent["reason"],
++		targetSessionFile?: string,
++		prepareReplacement?: (source: ReadonlySessionManager) => void,
++	): Promise<void> {
+ 		// Settle any active response first so the aborted turn (including tool
+ 		// results) is persisted to the outgoing session before it is replaced.
+ 		await this.session.abort();
+@@ -173,8 +177,13 @@ export class AgentSessionRuntime {
+ 			reason,
+ 			targetSessionFile,
+ 		});
+-		this.beforeSessionInvalidate?.();
+-		this.session.dispose();
++		try {
++			// No await here: snapshot finalization and loading precede invalidation and new work.
++			prepareReplacement?.(this.session.sessionManager);
++		} finally {
++			this.beforeSessionInvalidate?.();
++			this.session.dispose();
++		}
+ 	}
+ 
+ 	private apply(result: CreateAgentSessionRuntimeResult): void {
+@@ -197,72 +206,99 @@ export class AgentSessionRuntime {
+ 		sessionPath: string,
+ 		options?: {
+ 			cwdOverride?: string;
++			requireIdle?: boolean;
++			prepareSnapshot?: (source: ReadonlySessionManager) => void;
+ 			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+ 			projectTrustContextFactory?: (cwd: string) => ProjectTrustContext;
+ 		},
+ 	): Promise<{ cancelled: boolean }> {
+-		const beforeResult = await this.emitBeforeSwitch("resume", sessionPath);
+-		if (beforeResult.cancelled) {
+-			return beforeResult;
+-		}
++		if (this.session.isSessionReplacementPending) return { cancelled: true };
++		const guarded = options?.requireIdle || options?.prepareSnapshot !== undefined;
++		const release = guarded ? this.session.reserveSessionReplacement() : undefined;
++		if (guarded && !release) return { cancelled: true };
++		let retiring = false;
++		try {
++			const beforeResult = await this.emitBeforeSwitch("resume", sessionPath);
++			if (beforeResult.cancelled) return beforeResult;
+ 
+-		const previousSessionFile = this.session.sessionFile;
+-		const sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
+-		assertSessionCwdExists(sessionManager, this.cwd);
+-		await this.teardownCurrent("resume", sessionManager.getSessionFile());
+-		this.apply(
+-			await this.createRuntime({
+-				cwd: sessionManager.getCwd(),
+-				agentDir: this.services.agentDir,
+-				sessionManager,
+-				sessionStartEvent: { type: "session_start", reason: "resume", previousSessionFile },
+-				projectTrustContext: options?.projectTrustContextFactory?.(sessionManager.getCwd()),
+-			}),
+-		);
+-		await this.finishSessionReplacement(options?.withSession);
+-		return { cancelled: false };
++			const previousSessionFile = this.session.sessionFile;
++			let sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
++			assertSessionCwdExists(sessionManager, this.cwd);
++			const expectedCwd = sessionManager.getCwd(),
++				expectedId = sessionManager.getSessionId();
++			retiring = true;
++			await this.teardownCurrent("resume", sessionManager.getSessionFile(), (source) => {
++				if (!options?.prepareSnapshot) return;
++				options.prepareSnapshot(source);
++				sessionManager = SessionManager.open(sessionPath, undefined, options.cwdOverride);
++				if (!pathsEqual(sessionManager.getCwd(), expectedCwd) || sessionManager.getSessionId() !== expectedId) {
++					throw new Error("Prepared session snapshot changed its target directory or session ID.");
++				}
++				assertSessionCwdExists(sessionManager, this.cwd);
++			});
++			this.apply(
++				await this.createRuntime({
++					cwd: sessionManager.getCwd(),
++					agentDir: this.services.agentDir,
++					sessionManager,
++					sessionStartEvent: { type: "session_start", reason: "resume", previousSessionFile },
++					projectTrustContext: options?.projectTrustContextFactory?.(sessionManager.getCwd()),
++				}),
++			);
++			await this.finishSessionReplacement(options?.withSession);
++			return { cancelled: false };
++		} finally {
++			if (!retiring) release?.();
++		}
+ 	}
+ 
+ 	async newSession(options?: {
++		requireIdle?: boolean;
+ 		parentSession?: string;
+ 		setup?: (sessionManager: SessionManager) => Promise<void>;
+ 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+ 	}): Promise<{ cancelled: boolean }> {
+-		const beforeResult = await this.emitBeforeSwitch("new");
+-		if (beforeResult.cancelled) {
+-			return beforeResult;
+-		}
++		if (this.session.isSessionReplacementPending) return { cancelled: true };
++		const release = options?.requireIdle ? this.session.reserveSessionReplacement() : undefined;
++		if (options?.requireIdle && !release) return { cancelled: true };
++		let retiring = false;
++		try {
++			const beforeResult = await this.emitBeforeSwitch("new");
++			if (beforeResult.cancelled) return beforeResult;
+ 
+-		const previousSessionFile = this.session.sessionFile;
+-		const sessionDir = this.session.sessionManager.getSessionDir();
+-		const sessionManager = this.session.sessionManager.isPersisted()
+-			? SessionManager.create(this.cwd, sessionDir)
+-			: SessionManager.inMemory(this.cwd);
+-		if (options?.parentSession) {
+-			sessionManager.newSession({ parentSession: options.parentSession });
+-		}
++			const previousSessionFile = this.session.sessionFile;
++			const sessionDir = this.session.sessionManager.getSessionDir();
++			const sessionManager = this.session.sessionManager.isPersisted()
++				? SessionManager.create(this.cwd, sessionDir)
++				: SessionManager.inMemory(this.cwd);
++			if (options?.parentSession) sessionManager.newSession({ parentSession: options.parentSession });
+ 
+-		await this.teardownCurrent("new", sessionManager.getSessionFile());
+-		this.apply(
+-			await this.createRuntime({
+-				cwd: this.cwd,
+-				agentDir: this.services.agentDir,
+-				sessionManager,
+-				sessionStartEvent: { type: "session_start", reason: "new", previousSessionFile },
+-			}),
+-		);
+-		if (options?.setup) {
+-			await options.setup(this.session.sessionManager);
+-			this.session.refreshContext();
++			retiring = true;
++			await this.teardownCurrent("new", sessionManager.getSessionFile());
++			this.apply(
++				await this.createRuntime({
++					cwd: this.cwd,
++					agentDir: this.services.agentDir,
++					sessionManager,
++					sessionStartEvent: { type: "session_start", reason: "new", previousSessionFile },
++				}),
++			);
++			if (options?.setup) {
++				await options.setup(this.session.sessionManager);
++				this.session.refreshContext();
++			}
++			await this.finishSessionReplacement(options?.withSession);
++			return { cancelled: false };
++		} finally {
++			if (!retiring) release?.();
+ 		}
+-		await this.finishSessionReplacement(options?.withSession);
+-		return { cancelled: false };
+ 	}
+ 
+ 	async fork(
+ 		entryId: string,
+ 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+ 	): Promise<{ cancelled: boolean; selectedText?: string }> {
++		if (this.session.isSessionReplacementPending) return { cancelled: true };
+ 		const position = options?.position ?? "before";
+ 		const beforeResult = await this.emitBeforeFork(entryId, { position });
+ 		if (beforeResult.cancelled) {
+@@ -357,6 +393,7 @@ export class AgentSessionRuntime {
+ 	 * @throws {MissingSessionCwdError} When the imported session cwd cannot be resolved and no override is provided.
+ 	 */
+ 	async importFromJsonl(inputPath: string, cwdOverride?: string): Promise<{ cancelled: boolean }> {
++		if (this.session.isSessionReplacementPending) return { cancelled: true };
+ 		const resolvedPath = resolvePath(inputPath);
+ 		if (!existsSync(resolvedPath)) {
+ 			throw new SessionImportFileNotFoundError(resolvedPath);
+diff --git a/packages/coding-agent/src/core/agent-session.ts b/packages/coding-agent/src/core/agent-session.ts
+index f76247d..d19b57b 100644
+--- a/packages/coding-agent/src/core/agent-session.ts
++++ b/packages/coding-agent/src/core/agent-session.ts
+@@ -417,6 +417,7 @@ export class AgentSession {
+ 	private _unsubscribeAgent?: () => void;
+ 	private _eventListeners: AgentSessionEventListener[] = [];
+ 	private _isAgentRunActive = false;
++	private _sessionReplacementPending = false;
+ 	private _promptPreflightCount = 0;
+ 	private _agentRunAbortRequested = false;
+ 	private _idleWaitPromise: Promise<void> | undefined;
+@@ -452,6 +453,7 @@ export class AgentSession {
+ 
+ 	// Bash execution state
+ 	private readonly _bashAbortControllers = new Set<AbortController>();
++	private _userBashPreflightCount = 0;
+ 	private _pendingBashMessages: BashExecutionMessage[] = [];
+ 
+ 	// Extension system
+@@ -1550,6 +1552,37 @@ export class AgentSession {
+ 		return !this._isAgentRunActive && !this.isCompacting;
+ 	}
+ 
++	/** Whether a guarded session replacement owns this session's work admission. */
++	get isSessionReplacementPending(): boolean {
++		return this._sessionReplacementPending;
++	}
++
++	/** Reserve an idle session until shutdown, or release it if the replacement is cancelled. */
++	reserveSessionReplacement(): (() => void) | undefined {
++		if (
++			this._sessionReplacementPending ||
++			!this.isIdle ||
++			this.isBashRunning ||
++			this._promptPreflightCount > 0 ||
++			this.agent.hasQueuedMessages() ||
++			this.pendingMessageCount > 0 ||
++			this._pendingNextTurnMessages.length > 0 ||
++			this._pendingCustomMessages.length > 0 ||
++			this._pendingBashMessages.length > 0 ||
++			this._isEmittingAgentSettled
++		)
++			return undefined;
++		this._sessionReplacementPending = true;
++		return () => {
++			this._sessionReplacementPending = false;
++		};
++	}
++
++	private _assertAcceptingWork(): void {
++		if (this._sessionReplacementPending)
++			throw new Error("Session replacement is in progress; retry after it finishes.");
++	}
++
+ 	/** Current effective system prompt, including changes not yet sent to the model. */
+ 	get systemPrompt(): string {
+ 		return buildSystemPrompt(this._runSystemPromptOptions ?? this._baseSystemPromptOptions);
+@@ -1941,6 +1974,7 @@ export class AgentSession {
+ 	 * @param onStarted Called once the run's messages are prepared, before the first request.
+ 	 */
+ 	private async _startRun(trigger: BeforeAgentStartTrigger, onStarted?: () => void): Promise<void> {
++		this._assertAcceptingWork();
+ 		this._isAgentRunActive = true;
+ 		this._agentRunAbortRequested = false;
+ 		let messages: AgentMessage[];
+@@ -2160,6 +2194,7 @@ export class AgentSession {
+ 	 * @throws Error if no model selected or no API key available (when not streaming)
+ 	 */
+ 	async prompt(text: string, options?: PromptOptions): Promise<void> {
++		this._assertAcceptingWork();
+ 		if (this._isEmittingAgentSettled) {
+ 			this._deferredSettledActions.push(async () => await this.prompt(text, options));
+ 			return;
+@@ -2388,6 +2423,7 @@ export class AgentSession {
+ 	 * Internal: Queue a steering message (already expanded, no extension command check).
+ 	 */
+ 	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
++		this._assertAcceptingWork();
+ 		this._steeringMessages.push(text);
+ 		this._emitQueueUpdate();
+ 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+@@ -2403,6 +2439,7 @@ export class AgentSession {
+ 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
+ 	 */
+ 	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
++		this._assertAcceptingWork();
+ 		this._followUpMessages.push(text);
+ 		this._emitQueueUpdate();
+ 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+@@ -2461,6 +2498,7 @@ export class AgentSession {
+ 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">,
+ 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
+ 	): Promise<void> {
++		if (options?.triggerTurn || options?.deliverAs === "nextTurn") this._assertAcceptingWork();
+ 		const appMessage = {
+ 			role: "custom" as const,
+ 			customType: message.customType,
+@@ -2921,7 +2959,9 @@ export class AgentSession {
+ 	 * @param customInstructions Optional instructions for the compaction summary
+ 	 */
+ 	async compact(customInstructions?: string): Promise<CompactionResult> {
++		this._assertAcceptingWork();
+ 		await this.abort();
++		this._assertAcceptingWork();
+ 		this._compactionAbortController = new AbortController();
+ 		this._emit({ type: "compaction_start", reason: "manual" });
+ 		let fromExtension = false;
+@@ -3592,6 +3632,14 @@ export class AgentSession {
+ 				getModel: () => this.model,
+ 				getScopedModels: () => this._scopedModels,
+ 				isIdle: () => this.isIdle,
++				isBashRunning: () => this.isBashRunning,
++				beginUserBash: () => {
++					this._assertAcceptingWork();
++					this._userBashPreflightCount++;
++					return () => {
++						this._userBashPreflightCount--;
++					};
++				},
+ 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
+ 				getSignal: () => this.agent.signal,
+ 				abort: () => {
+@@ -3813,6 +3861,7 @@ export class AgentSession {
+ 	}
+ 
+ 	async reload(options?: { beforeSessionStart?: () => void | Promise<void> }): Promise<void> {
++		this._assertAcceptingWork();
+ 		if (this.isStreaming) {
+ 			throw new Error("Wait for the current response to finish before reloading.");
+ 		}
+@@ -4005,6 +4054,7 @@ export class AgentSession {
+ 		onChunk?: (chunk: string) => void,
+ 		options?: { excludeFromContext?: boolean; id?: string; operations?: BashOperations },
+ 	): Promise<BashResult> {
++		this._assertAcceptingWork();
+ 		const abortController = new AbortController();
+ 		this._bashAbortControllers.add(abortController);
+ 
+@@ -4072,7 +4122,7 @@ export class AgentSession {
+ 
+ 	/** Whether a bash command is currently running */
+ 	get isBashRunning(): boolean {
+-		return this._bashAbortControllers.size > 0;
++		return this._bashAbortControllers.size > 0 || this._userBashPreflightCount > 0;
+ 	}
+ 
+ 	/** Whether there are pending bash messages waiting to be flushed */
+@@ -4127,6 +4177,7 @@ export class AgentSession {
+ 		targetId: string,
+ 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
+ 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
++		this._assertAcceptingWork();
+ 		if (this.isStreaming || this._promptPreflightCount > 0) {
+ 			throw new Error("Wait for the current response to finish before navigating the session tree.");
+ 		}
+diff --git a/packages/coding-agent/src/core/extensions/runner.ts b/packages/coding-agent/src/core/extensions/runner.ts
+index bf2c638..dc619f1 100644
+--- a/packages/coding-agent/src/core/extensions/runner.ts
++++ b/packages/coding-agent/src/core/extensions/runner.ts
+@@ -234,6 +234,7 @@ interface BoundaryDispatchResult {
+ }
+ 
+ export type NewSessionHandler = (options?: {
++	requireIdle?: boolean;
+ 	parentSession?: string;
+ 	setup?: (sessionManager: SessionManager) => Promise<void>;
+ 	withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+@@ -373,6 +374,8 @@ export class ExtensionRunner {
+ 	private getModel: () => Model<any> | undefined = () => undefined;
+ 	private getScopedModels: () => readonly ScopedModel[] = () => [];
+ 	private isIdleFn: () => boolean = () => true;
++	private isBashRunningFn?: () => boolean;
++	private beginUserBashFn?: () => () => void;
+ 	private isProjectTrustedFn: () => boolean = () => true;
+ 	private getSignalFn: () => AbortSignal | undefined = () => undefined;
+ 	private waitForIdleFn: () => Promise<void> = async () => {};
+@@ -391,6 +394,7 @@ export class ExtensionRunner {
+ 	private forkHandler: ForkHandler = async () => ({ cancelled: false });
+ 	private navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
+ 	private switchSessionHandler: SwitchSessionHandler = async () => ({ cancelled: false });
++	private switchSessionWhenIdleHandler: ExtensionCommandContextActions["switchSessionWhenIdle"];
+ 	private reloadHandler: ReloadHandler = async () => {};
+ 	private shutdownHandler: ShutdownHandler = () => {};
+ 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
+@@ -447,6 +451,8 @@ export class ExtensionRunner {
+ 		this.getModel = contextActions.getModel;
+ 		this.getScopedModels = contextActions.getScopedModels;
+ 		this.isIdleFn = contextActions.isIdle;
++		this.isBashRunningFn = contextActions.isBashRunning;
++		this.beginUserBashFn = contextActions.beginUserBash;
+ 		this.isProjectTrustedFn = contextActions.isProjectTrusted;
+ 		this.getSignalFn = contextActions.getSignal;
+ 		this.abortFn = contextActions.abort;
+@@ -557,6 +563,7 @@ export class ExtensionRunner {
+ 			this.forkHandler = actions.fork;
+ 			this.navigateTreeHandler = actions.navigateTree;
+ 			this.switchSessionHandler = actions.switchSession;
++			this.switchSessionWhenIdleHandler = actions.switchSessionWhenIdle;
+ 			this.reloadHandler = actions.reload;
+ 			return;
+ 		}
+@@ -566,6 +573,7 @@ export class ExtensionRunner {
+ 		this.forkHandler = async () => ({ cancelled: false });
+ 		this.navigateTreeHandler = async () => ({ cancelled: false });
+ 		this.switchSessionHandler = async () => ({ cancelled: false });
++		this.switchSessionWhenIdleHandler = undefined;
+ 		this.reloadHandler = async () => {};
+ 	}
+ 
+@@ -933,6 +941,12 @@ export class ExtensionRunner {
+ 				runner.assertActive();
+ 				return runner.isIdleFn();
+ 			},
++			isBashRunning: this.isBashRunningFn
++				? () => {
++						runner.assertActive();
++						return runner.isBashRunningFn!();
++					}
++				: undefined,
+ 			isProjectTrusted: () => {
+ 				runner.assertActive();
+ 				return runner.isProjectTrustedFn();
+@@ -1033,6 +1047,13 @@ export class ExtensionRunner {
+ 			this.assertActive();
+ 			return this.switchSessionHandler(sessionPath, options);
+ 		};
++		const switchWhenIdle = this.switchSessionWhenIdleHandler;
++		if (switchWhenIdle) {
++			context.switchSessionWhenIdle = (sessionPath, options) => {
++				this.assertActive();
++				return switchWhenIdle(sessionPath, options);
++			};
++		}
+ 		context.reload = () => {
+ 			this.assertActive();
+ 			return this.reloadHandler();
+@@ -1275,33 +1296,47 @@ export class ExtensionRunner {
+ 
+ 	async emitUserBash(event: UserBashEvent): Promise<UserBashEventResult | undefined> {
+ 		const ctx = this.createContext();
++		let finish: (() => void) | undefined;
++		try {
++			finish = this.beginUserBashFn?.();
++		} catch (error) {
++			this.emitError({
++				extensionPath: "<runtime>",
++				event: "user_bash",
++				error: error instanceof Error ? error.message : String(error),
++			});
++			throw error;
++		}
+ 
+-		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "user_bash")) {
+-			for (const handler of handlers) {
+-				try {
+-					const handlerResult = await handler(event, ctx);
+-					if (handlerResult === undefined) continue;
+-					if (!isUserBashEventResult(handlerResult)) {
+-						throw new Error(
+-							"Invalid user_bash handler result: return undefined for local execution or exactly one valid { operations } or { result } object",
+-						);
++		try {
++			for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "user_bash")) {
++				for (const handler of handlers) {
++					try {
++						const handlerResult = await handler(event, ctx);
++						if (handlerResult === undefined) continue;
++						if (!isUserBashEventResult(handlerResult)) {
++							throw new Error(
++								"Invalid user_bash handler result: return undefined for local execution or exactly one valid { operations } or { result } object",
++							);
++						}
++						return handlerResult;
++					} catch (err) {
++						const message = err instanceof Error ? err.message : String(err);
++						const stack = err instanceof Error ? err.stack : undefined;
++						this.emitError({
++							extensionPath: ext.path,
++							event: "user_bash",
++							error: message,
++							stack,
++						});
++						throw err;
+ 					}
+-					return handlerResult;
+-				} catch (err) {
+-					const message = err instanceof Error ? err.message : String(err);
+-					const stack = err instanceof Error ? err.stack : undefined;
+-					this.emitError({
+-						extensionPath: ext.path,
+-						event: "user_bash",
+-						error: message,
+-						stack,
+-					});
+-					throw err;
+ 				}
+ 			}
++			return undefined;
++		} finally {
++			finish?.();
+ 		}
+-
+-		return undefined;
+ 	}
+ 
+ 	/**
+diff --git a/packages/coding-agent/src/core/extensions/types.ts b/packages/coding-agent/src/core/extensions/types.ts
+index 7fcc870..7150d57 100644
+--- a/packages/coding-agent/src/core/extensions/types.ts
++++ b/packages/coding-agent/src/core/extensions/types.ts
+@@ -367,6 +367,8 @@ export interface ExtensionContext {
+ 	thinkingLevel?: ThinkingLevel;
+ 	/** Whether the agent is idle (not streaming) */
+ 	isIdle(): boolean;
++	/** Whether a user shell command or its user_bash handlers are running. Absent on older hosts. */
++	isBashRunning?(): boolean;
+ 	/** Whether project-local trust is active for this context. */
+ 	isProjectTrusted(): boolean;
+ 	/** The current abort signal, or undefined when the agent is not streaming. */
+@@ -428,6 +430,8 @@ export interface ExtensionCommandContext extends ExtensionContext {
+ 
+ 	/** Start a new session, optionally with initialization. */
+ 	newSession(options?: {
++		/** Cancel without interrupting work unless the session can be reserved for replacement. */
++		requireIdle?: boolean;
+ 		parentSession?: string;
+ 		setup?: (sessionManager: SessionManager) => Promise<void>;
+ 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+@@ -451,6 +455,20 @@ export interface ExtensionCommandContext extends ExtensionContext {
+ 		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+ 	): Promise<{ cancelled: boolean }>;
+ 
++	/**
++	 * Reserve an idle session (including user shell commands), then switch without interrupting work.
++	 * prepareSnapshot runs synchronously after all shutdown handlers and before loading the target.
++	 * Read only the supplied source during that callback; do not retain it or use captured contexts.
++	 * Absent when the host does not implement this lifecycle boundary.
++	 */
++	switchSessionWhenIdle?(
++		sessionPath: string,
++		options?: {
++			prepareSnapshot?: (source: ReadonlySessionManager) => void;
++			withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
++		},
++	): Promise<{ cancelled: boolean }>;
++
+ 	/** Reload extensions, skills, prompts, themes, and context files. */
+ 	reload(): Promise<void>;
+ }
+@@ -2261,6 +2279,9 @@ export interface ExtensionContextActions {
+ 	getModel: () => Model<any> | undefined;
+ 	getScopedModels: () => readonly ScopedModel[];
+ 	isIdle: () => boolean;
++	isBashRunning?: () => boolean;
++	/** Reserve the user_bash dispatch span; the returned callback releases it. */
++	beginUserBash?: () => () => void;
+ 	isProjectTrusted: () => boolean;
+ 	getSignal: () => AbortSignal | undefined;
+ 	abort: () => void;
+@@ -2288,6 +2309,7 @@ export interface ExtensionContextActions {
+ export interface ExtensionCommandContextActions {
+ 	waitForIdle: () => Promise<void>;
+ 	newSession: (options?: {
++		requireIdle?: boolean;
+ 		parentSession?: string;
+ 		setup?: (sessionManager: SessionManager) => Promise<void>;
+ 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
+@@ -2304,6 +2326,7 @@ export interface ExtensionCommandContextActions {
+ 		sessionPath: string,
+ 		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
+ 	) => Promise<{ cancelled: boolean }>;
++	switchSessionWhenIdle?: NonNullable<ExtensionCommandContext["switchSessionWhenIdle"]>;
+ 	reload: () => Promise<void>;
+ }
+ 
+diff --git a/packages/coding-agent/src/modes/interactive/interactive-mode.ts b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+index d8e2390..e21283c 100644
+--- a/packages/coding-agent/src/modes/interactive/interactive-mode.ts
++++ b/packages/coding-agent/src/modes/interactive/interactive-mode.ts
+@@ -2148,6 +2148,9 @@ export class InteractiveMode {
+ 				switchSession: async (sessionPath, options) => {
+ 					return this.handleResumeSession(sessionPath, options);
+ 				},
++				switchSessionWhenIdle: async (sessionPath, options) => {
++					return this.handleResumeSession(sessionPath, { ...options, requireIdle: true });
++				},
+ 				reload: async () => {
+ 					await this.handleReloadCommand();
+ 				},
+@@ -2394,6 +2397,7 @@ export class InteractiveMode {
+ 			scopedModels: this.session.scopedModels,
+ 			thinkingLevel: this.session.thinkingLevel,
+ 			isIdle: () => this.session.isIdle,
++			isBashRunning: () => this.session.isBashRunning,
+ 			isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
+ 			signal: this.session.agent.signal,
+ 			abort: () => {
+@@ -5942,12 +5946,12 @@ export class InteractiveMode {
+ 
+ 	private async handleResumeSession(
+ 		sessionPath: string,
+-		options?: Parameters<ExtensionCommandContext["switchSession"]>[1],
++		options?: Parameters<AgentSessionRuntime["switchSession"]>[1],
+ 	): Promise<{ cancelled: boolean }> {
+ 		this.clearStatusIndicator();
+ 		try {
+ 			const result = await this.runtimeHost.switchSession(sessionPath, {
+-				withSession: options?.withSession,
++				...options,
+ 				projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
+ 			});
+ 			if (result.cancelled) {
+@@ -5956,7 +5960,8 @@ export class InteractiveMode {
+ 			this.showStatus("Resumed session");
+ 			return result;
+ 		} catch (error: unknown) {
+-			if (error instanceof MissingSessionCwdError) {
++			// A prepared snapshot must retain its exact target; do not redirect it to another cwd or fork.
++			if (error instanceof MissingSessionCwdError && !options?.requireIdle) {
+ 				switch (await this.promptForMissingSessionCwd(error)) {
+ 					case "continue": {
+ 						const result = await this.runtimeHost.switchSession(sessionPath, {
+diff --git a/packages/coding-agent/src/modes/print-mode.ts b/packages/coding-agent/src/modes/print-mode.ts
+index 84c0f9b..a9c6887 100644
+--- a/packages/coding-agent/src/modes/print-mode.ts
++++ b/packages/coding-agent/src/modes/print-mode.ts
+@@ -101,6 +101,9 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
+ 				switchSession: async (sessionPath, switchOptions) => {
+ 					return runtimeHost.switchSession(sessionPath, switchOptions);
+ 				},
++				switchSessionWhenIdle: async (sessionPath, switchOptions) => {
++					return runtimeHost.switchSession(sessionPath, { ...switchOptions, requireIdle: true });
++				},
+ 				reload: async () => {
+ 					await session.reload();
+ 				},
+diff --git a/packages/coding-agent/src/modes/rpc/rpc-mode.ts b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
+index afd8267..68c320b 100644
+--- a/packages/coding-agent/src/modes/rpc/rpc-mode.ts
++++ b/packages/coding-agent/src/modes/rpc/rpc-mode.ts
+@@ -342,6 +342,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
+ 				switchSession: async (sessionPath, options) => {
+ 					return runtimeHost.switchSession(sessionPath, options);
+ 				},
++				switchSessionWhenIdle: async (sessionPath, options) => {
++					return runtimeHost.switchSession(sessionPath, { ...options, requireIdle: true });
++				},
+ 				reload: async () => {
+ 					await session.reload();
+ 				},

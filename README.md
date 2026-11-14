@@ -4,11 +4,13 @@
 
 An independent Pi extension for switching workspaces: keep the current session, start fresh, or open Pi's native resume picker. Extracted from pi-file-sidebar, including its column picker, mouse navigation, position bars, long-name bubbles and bilingual interface.
 
-Requires Node **>=22.19.0** and stable Pi **>=1.4.0** (build metadata accepted, prereleases rejected). Development baseline: Pi **1.5.0**, with **1.5.0 / 1.5.2** verified and **1.4.0** retained for backward compatibility; later stable hosts are not version-pinned out. Version acceptance does not guarantee compatibility with every future host or terminal. Fullscreen and regular TUI are supported; RPC/print/JSON remain silent. No build step or runtime dependencies: Pi loads `extensions/index.ts` and supplies its SDK/TUI peers.
+Loading requires Node **>=22.19.0** and stable Pi **>=1.4.0** (build metadata accepted, prereleases rejected). **Directory commands now require the safe-switch host APIs in [the Pi 1.5.2 patch](patches/README.md).** Unpatched hosts load the extension but refuse `/cd`, `/cd-new` and `/cd-resume` without changing the session; language commands still work. A version number alone does not prove these APIs exist. Fullscreen and regular TUI are supported; RPC/print/JSON remain silent. The extension needs no build or runtime dependencies: Pi loads `extensions/index.ts` and supplies its SDK/TUI peers. Building the separate patched host is a one-time prerequisite.
 
 ## Installation and migration
 
-Install directly from GitHub:
+First [build the patched host in a separate checkout](patches/README.md); installing/reloading this extension alone cannot add the missing host APIs. No current Pi installation is changed automatically. The `pi` examples below assume the patched executable; otherwise use the explicit `node .../dist/cli.js` command in that guide.
+
+Install the extension from GitHub:
 
 ```bash
 pi install git:github.com/llc2214926/pi-cd-workspace
@@ -27,7 +29,7 @@ pi --no-extensions -e ./extensions/index.ts -e ../pi-file-sidebar/extensions/ind
 
 The old `/file-sidebar cd` alias and sidebar directory-menu switching actions are removed, not forwarded. Use `/cd` to browse or `/cd <encoded-path>` to switch directly. Existing sessions, `cd-picker` markers, `.cd-backup` and `.cd-abandoned` files remain compatible; no session migration is needed. Language now belongs to this extension: set `/cd-workspace lang en` if desired. It does not read or modify the sidebar's language preference.
 
-For a standalone distributable copy, run `npm pack`, unpack its `package/` into a new directory, and `pi install` that directory. Do not register both source and packed copies at once. Package files include both READMEs and all runtime source, not tests, development dependencies or artifacts.
+For a standalone distributable copy, run `npm pack`, unpack its `package/` into a new directory, and `pi install` that directory. Do not register both source and packed copies at once. Package files include both READMEs, runtime source and the documented host patch, not tests, development dependencies or build artifacts.
 
 ## Commands
 
@@ -41,7 +43,7 @@ For a standalone distributable copy, run `npm pack`, unpack its `package/` into 
 
 Without a path, all three cd commands open the same picker. Arguments are **URI-encoded paths**, not shell-quoted strings: `/cd %2FUsers%2Fme%2FMy%20Project`. Encode the entire path once with `encodeURIComponent`. Relative paths resolve against `ctx.cwd`; `~` and `~/…` are supported. Malformed encoding and NUL are rejected. The selected target is revalidated with `realpath`, directory type, and read/execute access; explicitly provided symlinks are resolved. No shell runs.
 
-Run from the main editor while Pi is idle, with no queued messages or blocking UI. A shared in-flight lock prevents mixed cd requests from overlapping. If another component owns focus (including sidebar navigation, resizing or external editing), return to the editor first; this extension does not force it to close. Commands recheck idle/UI availability after picking. `/cd` and cross-directory switching require persistence; same-directory new/resume work with `--no-session`.
+Run from the main editor while Pi is idle, with no running shell commands, queued messages or blocking UI. A shared in-flight lock prevents mixed cd requests from overlapping. If another component owns focus (including sidebar navigation, resizing or external editing), return to the editor first; this extension does not force it to close. Commands recheck idle/UI availability after picking. `/cd` and cross-directory switching require persistence; same-directory new/resume work with `--no-session`.
 
 ## Picker
 
@@ -72,11 +74,11 @@ A truncated selected name opens a rounded, non-capturing full-name bubble, cappe
 
 ## Session safety
 
-- `/cd` exclusively creates a private `0600` JSONL snapshot preserving the ID, header metadata, all entries/branches and active leaf. A non-model `cd-picker` marker records `{ from, to }`. It does **not** resume the target project's previous conversation.
-- The host `switchSession()` lifecycle rebuilds cwd-bound resources, tools and extensions under Pi's trust rules. No `process.chdir`, host patch, command-message bridge, or model call is used. Post-switch work uses only the fresh `withSession` context.
+- `/cd` exclusively stages a private `0600` JSONL recovery snapshot. After all `session_before_switch` and `session_shutdown` saves, it atomically replaces that snapshot from the final source state **before the host loads it**. This preserves the ID, header metadata, all entries/branches and active leaf. A non-model `cd-picker` marker records `{ from, to }`. It does **not** resume the target project's previous conversation.
+- The patched host's `switchSessionWhenIdle()` reserves idle work admission, including user shell commands and their async hooks; busy sessions are refused, not interrupted. Its replacement lifecycle rebuilds cwd-bound resources, tools and extensions under Pi's trust rules. No `process.chdir`, runtime monkey-patch, command-message bridge, or model call is used. Post-switch work uses only the fresh `withSession` context.
 - Draft text is restored for `/cd`; **cursor position is not guaranteed**. Restoration errors warn. Cancelling a picker preserves the original editor object and draft.
 - After verified takeover, `/cd` archives the source as `.cd-backup` (UUID suffix on collision). A source not yet flushed needs no archive. `EXDEV` falls back to exclusive copy and retains the source, with a warning. Archive failures leave the new session active and original file intact.
-- Fresh modes never copy old messages, branches, summaries, names, extension state, parent links or drafts, and never archive/modify the original session. Because Pi 1.4/1.5 `newSession()` cannot accept cwd, cross-directory fresh modes stage a header-only JSONL and use `switchSession()`; lifecycle reason is `resume` although the session ID/history are new. Same-directory `/cd-new` calls `newSession()` directly, with no staged file.
+- Fresh modes never copy old messages, branches, summaries, names, extension state, parent links or drafts, and never archive/modify the original session themselves. The old host's shutdown hooks can still save to it. Cross-directory fresh modes stage a header-only JSONL and use `switchSessionWhenIdle()`; lifecycle reason is `resume` although the session ID/history are new. Same-directory `/cd-new` calls `newSession({ requireIdle: true })`, with no staged file.
 - Default session storage follows the target directory; explicitly configured session storage stays unchanged.
 - Cancelling or a catchable pre-takeover failure quarantines the staged file as `.cd-abandoned` (UUID on collision), never deletes it. Partial writes are also quarantined when possible; a failed quarantine reports the surviving path. Backups/quarantined files stay out of `/resume`.
 - Native resume uses the current editor's `app.session.resume` action. Pi owns selection, search, scope, rename/delete and cancellation; no history is automatically selected. Cancelling after a cross-directory resume leaves the empty target session; cancelling same-directory resume keeps the original. Missing custom-editor capabilities warn instead of sending `/resume` to a model. If opening the list fails after takeover, the target session remains active; use `/resume` manually.
@@ -108,15 +110,15 @@ node --import tsx --test tests/*.test.ts
 npm pack --dry-run
 ```
 
-Run against isolated Pi 1.5.0, 1.5.2, and 1.4.0 dependency trees. All three versions pass source/test type checks and 103 local regressions for filesystem/session failure paths, picker rendering/input, and independent/co-loaded behavior in fullscreen and regular modes. The UI checks use Pi's real loader/components with an in-memory terminal and simulated command context. A real InteractiveMode with an in-memory terminal also passes four-extension co-loading in two orders, picker cancellation, reload, and session replacement on all three versions. Unpacked packages also load independently and in either order without repository dependencies.
+Local checks cover filesystem/session failures, control-character escaping with readable multiline notices, picker rendering/input, and independent/co-loaded behavior in fullscreen and regular modes. The SDK 1.5.0 checks use simulated command contexts with the new capability contract; they do **not** imply that unpatched 1.5.0 supports switching. The patched 1.5.2 runtime is also tested with this extension loaded, a real child shell, late hook saves, fresh sessions and final-write failures, using isolated sessions and an in-memory terminal. See [host verification and limitations](patches/README.md).
 
 These checks do not replace formal human real-terminal acceptance, which remains pending. The latest background PTY attempt was blocked before Pi started (`os.openpty`: `Operation not permitted`); actual terminal session replacement/reload has not been revalidated after this split.
 
-Manual checklist on all three hosts:
+Manual checklist on the patched host (on unpatched hosts, verify that directory commands warn and leave the session unchanged):
 
 - Each extension alone, both load orders, fullscreen/regular, 80/120 columns and narrow/short resizing; no duplicate commands or focus/wheel leakage.
 - All three modes, same directory/aliases/links and cross-directory targets, spaces/Chinese/quotes/percent, missing/unreadable targets, in-memory restrictions, native resume select/cancel.
 - Retained history/ID/draft for `/cd`; empty new IDs and untouched originals for fresh modes; new cwd/trust/resources after takeover, correct backup/quarantine behavior.
 - Column/parent clicks and wheel, hidden toggle, r return, arrow acceleration, files-only/empty/error directories, full-name bubbles and independent position bars after idle/resize.
-- Busy/queued messages, foreign modals/sidebar resizing/external editor, rapid mixed commands, reload while reading/picking/saving, and independent languages with isolated invalid/unwritable configs.
+- Running shell/queued messages, late shutdown saves, foreign modals/sidebar resizing/external editor, rapid mixed commands, reload while reading/picking/saving, and independent languages with isolated invalid/unwritable configs.
 - Repeat from unpacked packages with no source-repository dependency. Never simulate failures using live session files.
