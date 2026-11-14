@@ -1,21 +1,28 @@
-# Safe workspace switching / 安全切换宿主补丁
+# Optional safe-switch host patch / 可选安全切换宿主补丁
 
 `pi-1.5.2-workspace-switch.patch` targets **Pi v1.5.2**, commit
 `b4afdddf44e059c67ccf5097e5317d913521b470` in <https://github.com/earendil-works/pi>.
 It contains host runtime changes only, no tests or generated artifacts. It is not an upstream release.
 
-此补丁针对上述固定版本，尚非上游发布功能。扩展不会自动应用补丁或改写当前 Pi 安装。
-未经补丁的宿主仍可加载扩展和设置语言，但三个目录命令会明确拒绝执行；不能只按版本号判断安全接口是否存在。
+**Optional, not installed by default.** Installing or reloading the extension never applies this patch.
+Stock Pi keeps the original directory-switching behavior; missing patch APIs do not block any directory command.
+Only follow the build steps below if you choose the additional shell and shutdown-snapshot safeguards.
+
+**此补丁可选，默认不安装。** 扩展不会自动应用补丁或改写当前 Pi 安装。没有补丁时，三个目录命令按原逻辑执行；
+手动使用带补丁的宿主后，才会自动使用增强接口。此补丁针对上述固定版本，尚非上游发布功能。
 
 ## Why / 原因
 
 - `ctx.isIdle()` does not include user shell commands. Replacing that session could abort a running job.
 - Copying a session before `session_before_switch` / `session_shutdown` misses state saved by those hooks.
 
+These are known limits of the original flow, not installation requirements. Without the patch, wait for shell work
+before switching; late shutdown saves may exist only in the source backup. The commands remain available.
+
 补丁暴露 shell 忙碌状态，并在替换前预留空闲会话；运行中的 shell（含异步 `user_bash` 回调）不会被目录命令取消。
 `/cd` 的最终快照在所有关闭钩子完成后、目标加载前同步写入，包含钩子保存的条目。
 
-## Apply to a separate checkout / 在独立源码应用
+## Optional: apply to a separate checkout / 可选：在独立源码应用
 
 Use a **new** directory, not the current Pi installation or a shared worktree with pending changes.
 Set `EXTENSION` to this extension's absolute path. Do not apply the patch twice.
@@ -50,9 +57,9 @@ PI_CODING_AGENT_DIR="$AGENT_DIR" node packages/coding-agent/dist/cli.js \
 ```
 
 This builds and runs the separate checkout. No global installation, symlink, or running process is replaced.
-Build once after applying the patch; `/reload` alone cannot update the host runtime.
+Build once after applying the patch; `/reload` alone cannot update the host runtime. None of these steps are needed for stock Pi.
 
-构建后运行独立宿主，不覆盖全局安装。只 `/reload` 扩展不能让未打补丁的宿主获得新接口。
+构建后运行独立宿主，不覆盖全局安装。只 `/reload` 扩展不能获得新接口，但原版 Pi 无需以上步骤即可使用目录命令。
 
 ## API contract / 接口约定
 
@@ -66,13 +73,14 @@ Build once after applying the patch; `/reload` alone cannot update the host runt
 - Reservations reject new prompts, shells, compaction, tree navigation and reload until cancellation or replacement.
   Saving extension entries during shutdown remains allowed. Ordinary native switches without the guard keep their existing behavior.
 
-`/cd` 先保留一个私有恢复快照，再使用同目录 `0600` 临时文件原子替换最终快照；失败时保留原会话和已有快照。
-新建模式故意不复制旧状态。确认新会话接管后才归档原会话；提示保留正常换行，路径和错误中的控制字符仍会转义。
+增强模式下，`/cd` 先保留一个私有恢复快照，再使用同目录 `0600` 临时文件原子替换最终快照；失败时保留原会话和已有快照。
+没有增强接口时只调用原 `switchSession(path, { withSession })` / `newSession()`，不传补丁专属选项。
+新建模式故意不复制旧状态。两种流程的 `/cd` 都在确认新会话接管后才归档原会话；提示保留正常换行，路径和错误中的控制字符仍会转义。
 
 ## Verification / 验证记录
 
-- Source and test type checks; 112 local tests on SDK 1.4.0 / 1.5.0 / 1.5.2. Switching mocks implement the new contract;
-  separate real-runtime checks confirm that unpatched hosts refuse all directory commands while language settings still work.
+- Source/test type checks and 127 local tests passed on SDK 1.4.0 / 1.5.0 / 1.5.2, covering both original and enhanced APIs.
+  Real unpatched-runtime checks cover all three directory commands, same/cross-directory behavior, native resume and language settings.
   The 1.4.0 co-load check uses the archived 1.4-compatible sidebar, not the newer sidebar requiring 1.5.
 - Patched host: `npm run check`, `npm run build:offline`, and 187 targeted tests passed, including 11 local safety/integration cases.
   Ten upstream tree-navigation API tests were skipped without credentials. RPC tests pass but emit listener-count warnings from

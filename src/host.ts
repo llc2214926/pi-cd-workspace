@@ -3,7 +3,7 @@ import type { Component, TUI } from "@earendil-works/pi-tui";
 import { isSupportedPiVersion } from "./compat.ts";
 import { WorkspaceError } from "./i18n.ts";
 
-// 补丁接口是可选能力；旧 SDK 仍可加载扩展，但不能静默退回不安全的替换。
+// 补丁默认不安装；只在宿主提供这些可选接口时启用增强，否则沿用原版流程。
 export interface WorkspaceCommandContext extends ExtensionCommandContext {
   isBashRunning?(): boolean;
   newSession(options?: NonNullable<Parameters<ExtensionCommandContext["newSession"]>[0]> & { requireIdle?: boolean }): Promise<{ cancelled: boolean }>;

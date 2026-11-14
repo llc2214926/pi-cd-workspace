@@ -35,12 +35,11 @@ export async function performSwitch(ctx: WorkspaceCommandContext, picked: string
   options: { captureDraft: boolean; language: Language; mode?: DirectoryMode }): Promise<"switched" | "cancelled"> {
   const language = options.language, text = getMessages(language).switch, mode = options.mode ?? "keep";
   if (!requireIdle(ctx)) throw new WorkspaceError("agentBusy");
-  if (!ctx.switchSessionWhenIdle) throw new WorkspaceError("hostUpgradeRequired");
   const target = validateTarget(picked, ctx.cwd, { allowCurrent: mode !== "keep" });
   if (isCurrentDirectory(target, ctx.cwd)) {
     if (mode === "resume") { openNativeResume(ctx); return "switched"; }
     // 同目录与 /new 相同，不建立目录切换快照，也不设置父会话或恢复草稿。
-    const result = await ctx.newSession({ requireIdle: true });
+    const result = await ctx.newSession(ctx.switchSessionWhenIdle ? { requireIdle: true } : undefined);
     return result.cancelled ? "cancelled" : "switched";
   }
   const manager = persistentManager(ctx), source = manager.getSessionFile()!;
@@ -57,11 +56,7 @@ export async function performSwitch(ctx: WorkspaceCommandContext, picked: string
   try {
     // Pi 的交互层遇到致命 runtime 错误可能直接 exit；提前显示恢复路径，不能承诺 catch 总能执行。
     ctx.ui.notify(mode === "keep" ? text.switching(displayText(source), displayText(destination)) : text.starting(displayText(source), displayText(destination)), "info");
-    const result = await ctx.switchSessionWhenIdle(destination, {
-      prepareSnapshot: mode === "keep" ? (settled) => {
-        try { finalizeSessionMove(settled, target, destination); }
-        catch (error) { throwSnapshotFailure(error, source, language); }
-      } : undefined,
+    const switchOptions: NonNullable<Parameters<WorkspaceCommandContext["switchSession"]>[1]> = {
       withSession: async (fresh) => {
         if (fresh.cwd !== target || fresh.sessionManager.getSessionFile() !== destination
           || fresh.sessionManager.getSessionId() !== sessionId) throw new WorkspaceError("sessionTakeoverFailed");
@@ -87,7 +82,17 @@ export async function performSwitch(ctx: WorkspaceCommandContext, picked: string
           } catch (error) { fresh.ui.notify(displayText(describeError(error, language)), "warning"); }
         }
       },
-    });
+    };
+    // shortcut: 原版宿主沿用提前快照；可选补丁才提供 shutdown 保存后的最终快照边界。
+    const result = ctx.switchSessionWhenIdle
+      ? await ctx.switchSessionWhenIdle(destination, {
+        ...switchOptions,
+        prepareSnapshot: mode === "keep" ? (settled) => {
+          try { finalizeSessionMove(settled, target, destination); }
+          catch (error) { throwSnapshotFailure(error, source, language); }
+        } : undefined,
+      })
+      : await ctx.switchSession(destination, switchOptions);
     if (result.cancelled) {
       abandonmentAttempted = true;
       recoveryPath = abandonDestination(destination);

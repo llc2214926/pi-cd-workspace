@@ -24,8 +24,7 @@ export function isCurrentDirectory(target: string, current: string): boolean {
 }
 
 export function requireIdle(ctx: Pick<WorkspaceCommandContext, "isIdle" | "hasPendingMessages" | "isBashRunning">): boolean {
-  if (!ctx.isBashRunning) throw new WorkspaceError("hostUpgradeRequired");
-  return ctx.isIdle() && !ctx.hasPendingMessages() && !ctx.isBashRunning();
+  return ctx.isIdle() && !ctx.hasPendingMessages() && !ctx.isBashRunning?.();
 }
 
 // Pi 1.4.0 的只读类型未暴露这两个查询，但实际提供的是 SessionManager。
