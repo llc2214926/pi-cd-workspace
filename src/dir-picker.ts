@@ -131,8 +131,11 @@ export class DirPicker implements Component {
     const next = !accelerate || !held || held.direction !== direction || now - held.last > REPEAT_RESET_AFTER
       ? { direction, since: now, last: now } : { direction, since: held.since, last: now };
     this.held = accelerate ? next : undefined;
-    this.col.sel += direction * (1 + REPEAT_STEP_AFTER.filter((threshold) => now - next.since >= threshold).length);
-    this.clamp(this.col);
+    const col = this.col, last = col.entries.length;
+    const atEdge = direction === -1 ? col.sel === 0 : col.sel === last;
+    if (!col.loading && atEdge) col.sel = direction === -1 ? last : 0;
+    else col.sel += direction * (1 + REPEAT_STEP_AFTER.filter((threshold) => now - next.since >= threshold).length);
+    this.clamp(col);
   }
 
   handleInput(data: string): void {
