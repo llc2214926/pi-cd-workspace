@@ -1,6 +1,5 @@
-import { VERSION, type CustomEditor, type ExtensionCommandContext, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { CustomEditor, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
-import { isSupportedPiVersion } from "./compat.ts";
 import { WorkspaceError } from "./i18n.ts";
 
 // 补丁默认不安装；只在宿主提供这些可选接口时启用增强，否则沿用原版流程。
@@ -17,7 +16,7 @@ type NativeTUI = TUI & { getFocusedComponent(): Component | null };
 
 // 非稳定焦点/原生恢复动作读取只在此处；不缓存 TUI、不改 root、编辑器或其他扩展的焦点。
 function commandEditor(ctx: ExtensionContext): Partial<CustomEditor> | undefined {
-  if (!isSupportedPiVersion(VERSION) || ctx.mode !== "tui" || !ctx.hasUI) return;
+  if (ctx.mode !== "tui" || !ctx.hasUI) return;
   let tui: NativeTUI | undefined;
   const key = "pi-cd-workspace:host-probe";
   try {
@@ -40,7 +39,7 @@ export function canOpenDirectoryUI(ctx: ExtensionContext): boolean {
 
 // 内置 /resume 不能经 sendUserMessage 分发；复用宿主当前编辑器已注册的原生动作。
 export function openNativeResume(ctx: ExtensionContext): void {
-  if (!isSupportedPiVersion(VERSION) || ctx.mode !== "tui" || !ctx.hasUI) throw new WorkspaceError("switchTuiOnly");
+  if (ctx.mode !== "tui" || !ctx.hasUI) throw new WorkspaceError("switchTuiOnly");
   const editor = commandEditor(ctx);
   const resume = editor?.actionHandlers instanceof Map ? editor.actionHandlers.get("app.session.resume") : undefined;
   if (typeof resume !== "function") throw new WorkspaceError("resumeUnavailable");

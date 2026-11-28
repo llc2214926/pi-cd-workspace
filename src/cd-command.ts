@@ -1,9 +1,7 @@
-import { VERSION } from "@earendil-works/pi-coding-agent";
 import { DirPicker, shortenPath } from "./dir-picker.ts";
 import { describeError, getMessages, WorkspaceError, type Language } from "./i18n.ts";
 import { abandonDestination, archiveSource, finalizeSessionMove, isCurrentDirectory, persistentManager, prepareEmptySession, prepareSessionMove, requireIdle, SessionPreparationError, validateTarget } from "./switch.ts";
 import { canOpenDirectoryUI, openNativeResume, type WorkspaceCommandContext } from "./host.ts";
-import { isSupportedPiVersion } from "./compat.ts";
 import { displayText } from "./display.ts";
 import { DoubleBorder } from "./frame.ts";
 
@@ -133,7 +131,7 @@ export class DirectoryCommands {
   async command(args: string, ctx: WorkspaceCommandContext, mode: DirectoryMode = "keep"): Promise<void> {
     if (this.disposed || ctx.mode !== "tui") return;
     const warn = (error: unknown) => ctx.ui.notify(displayText(describeError(error, this.language())), "warning");
-    if (!isSupportedPiVersion(VERSION) || !ctx.hasUI) { warn(new WorkspaceError("switchTuiOnly")); return; }
+    if (!ctx.hasUI) { warn(new WorkspaceError("switchTuiOnly")); return; }
     if (this.busy) { warn(new WorkspaceError("switchBusy")); return; }
     this.busy = true;
     let switching = false, switchLanguage = this.language();

@@ -1,15 +1,15 @@
 # Optional safe-switch host patch / 可选安全切换宿主补丁
 
-`pi-1.5.2-workspace-switch.patch` targets **Pi v1.5.2**, commit
-`b4afdddf44e059c67ccf5097e5317d913521b470` in <https://github.com/earendil-works/pi>.
-It contains host runtime changes only, no tests or generated artifacts. It is not an upstream release.
+`pi-1.7.0-workspace-switch.patch` targets **Pi v1.7.0**, commit `fb0fe823539f6d04850f6e34748c01f01f212e1f` in <https://github.com/earendil-works/pi>. The patch changes only host runtime code and is not an upstream release.
+
+该补丁仅面向上述固定的 Pi v1.7.0 提交。原版 Pi 1.7.0 及以上仍可直接使用扩展，不需要补丁。
 
 **Optional, not installed by default.** Installing or reloading the extension never applies this patch.
 Stock Pi keeps the original directory-switching behavior; missing patch APIs do not block any directory command.
 Only follow the build steps below if you choose the additional shell and shutdown-snapshot safeguards.
 
 **此补丁可选，默认不安装。** 扩展不会自动应用补丁或改写当前 Pi 安装。没有补丁时，三个目录命令按原逻辑执行；
-手动使用带补丁的宿主后，才会自动使用增强接口。此补丁针对上述固定版本，尚非上游发布功能。
+手动使用带补丁的宿主后，才会自动使用增强接口。此补丁尚非上游功能，不要应用于未列出的版本。
 
 ## Why / 原因
 
@@ -25,20 +25,21 @@ before switching; late shutdown saves may exist only in the source backup. The c
 ## Optional: apply to a separate checkout / 可选：在独立源码应用
 
 Use a **new** directory, not the current Pi installation or a shared worktree with pending changes.
-Set `EXTENSION` to this extension's absolute path. Do not apply the patch twice.
+Set `EXTENSION` to this extension's absolute path and check the pinned commit below. Do not apply the patch twice.
 
 ```bash
 EXTENSION=/absolute/path/to/pi-cd-workspace
-git clone --branch v1.5.2 --depth 1 https://github.com/earendil-works/pi.git pi-workspace-host
+PI_VERSION=1.7.0
+git clone --branch "v$PI_VERSION" --depth 1 https://github.com/earendil-works/pi.git pi-workspace-host
 cd pi-workspace-host
-git rev-parse HEAD  # must match b4afdddf44e059c67ccf5097e5317d913521b470
-git apply --check "$EXTENSION/patches/pi-1.5.2-workspace-switch.patch"
-git apply "$EXTENSION/patches/pi-1.5.2-workspace-switch.patch"
+git rev-parse HEAD  # must match the pinned commit above
+git apply --check "$EXTENSION/patches/pi-1.7.0-workspace-switch.patch"
+git apply "$EXTENSION/patches/pi-1.7.0-workspace-switch.patch"
 npm ci --ignore-scripts
 ```
 
-Pi's checkout does not contain its generated model values. Copy a valid catalog from a Pi install or unpack
-`@earendil-works/pi-ai@1.5.2` into a temporary directory, then copy `package/dist/providers/data/` to
+Pi's checkout does not contain its generated model values. Copy the matching version's catalog from a Pi install or unpack
+`@earendil-works/pi-ai@$PI_VERSION` into a temporary directory, then copy `package/dist/providers/data/` to
 `packages/ai/src/providers/data/`. Include `.manifest.json`. Do not edit the generated TypeScript wrappers.
 Alternatively, `npm run hydrate:model-data` fetches upstream catalogs (requires network; values may change).
 
@@ -79,15 +80,8 @@ Build once after applying the patch; `/reload` alone cannot update the host runt
 
 ## Verification / 验证记录
 
-- Source/test type checks and 127 local tests passed on SDK 1.4.0 / 1.5.0 / 1.5.2, covering both original and enhanced APIs.
-  Real unpatched-runtime checks cover all three directory commands, same/cross-directory behavior, native resume and language settings.
-  The 1.4.0 co-load check uses the archived 1.4-compatible sidebar, not the newer sidebar requiring 1.5.
-- Patched host: `npm run check`, `npm run build:offline`, and 187 targeted tests passed, including 11 local safety/integration cases.
-  Ten upstream tree-navigation API tests were skipped without credentials. RPC tests pass but emit listener-count warnings from
-  repeated RPC startup in their fixture; this patch does not change that setup. No model API calls were made.
-- The patch applies cleanly to the pinned commit and reproduces the seven edited host source files byte-for-byte.
-- The 17-file npm package contains the patch/docs and no tests or dependencies. The unpacked extension loads independently,
-  co-loads with the sidebar in either order, and passes the offline patched-runtime integration checks.
+- Tested on stock Pi 1.7.0 and the patched v1.7.0 checkout. The patch passed the offline build and 96 focused tests, including a running child shell, a final snapshot after shutdown hooks, and the session replacement lifecycle.
+- The npm package contains only extension source, documentation and the optional patch; no test code or generated Pi build.
 
 ## Limits / 限制
 

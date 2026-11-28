@@ -4,7 +4,7 @@
 
 An independent Pi extension for switching workspaces: keep the current session, start fresh, or open Pi's native resume picker. Extracted from pi-file-sidebar, including its column picker, mouse navigation, position bars, long-name bubbles and bilingual interface.
 
-Requires Node **>=22.19.0** and stable Pi **>=1.4.0** (build metadata accepted, prereleases rejected). **The host patch is optional and is not installed by default.** On stock Pi, `/cd`, `/cd-new` and `/cd-resume` use the original switching flow; missing patch APIs never block the commands. If you manually use a host with [the Pi 1.5.2 patch](patches/README.md), the extension detects its APIs and enables the extra protection. Fullscreen and regular TUI are supported; RPC/print/JSON remain silent. No extension build step or runtime dependencies: Pi loads `extensions/index.ts` and supplies its SDK/TUI peers.
+Requires Node **>=22.19.0** and stable Pi **>=1.7.0** (build metadata accepted; prereleases and older releases rejected). **The host patch is optional and is not installed by default.** On stock Pi, `/cd`, `/cd-new` and `/cd-resume` use the original switching flow; missing patch APIs never block the commands. If you manually use a host with [the optional patch for Pi 1.7.0](patches/README.md), the extension detects its APIs and enables the extra protection. Fullscreen and regular TUI are supported; RPC/print/JSON remain silent. No extension build step or runtime dependencies: Pi loads `extensions/index.ts` and supplies its SDK/TUI peers.
 
 ## Installation and migration
 
@@ -114,7 +114,7 @@ node --import tsx --test tests/*.test.ts
 npm pack --dry-run
 ```
 
-Local checks cover filesystem/session failures, control-character escaping with readable multiline notices, picker rendering/input, and independent/co-loaded behavior in fullscreen and regular modes. Real unpatched-runtime checks cover all three directory commands, same/cross-directory behavior and the native resume picker; unit checks cover both original and enhanced APIs. The patched 1.5.2 runtime is also tested with this extension loaded, a real child shell, late hook saves, fresh sessions and final-write failures, using isolated sessions and an in-memory terminal. See [host verification and limitations](patches/README.md).
+Local checks cover filesystem/session failures, control-character escaping with readable multiline notices, picker rendering/input, and independent/co-loaded behavior in fullscreen and regular modes. Real unpatched-runtime checks cover all three directory commands, same/cross-directory behavior and the native resume picker; unit checks cover both original and enhanced APIs. The patched 1.7.0 runtime is also tested with this extension loaded, a real child shell, late hook saves, fresh sessions and final-write failures, using isolated sessions and an in-memory terminal. See [host verification and limitations](patches/README.md).
 
 These checks do not replace formal human real-terminal acceptance, which remains pending. The latest background PTY attempt was blocked before Pi started (`os.openpty`: `Operation not permitted`); actual terminal session replacement/reload has not been revalidated after this split.
 

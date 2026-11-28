@@ -1,10 +1,12 @@
-import { getAgentDir, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, VERSION, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { DirectoryCommands } from "../src/cd-command.ts";
+import { isSupportedPiVersion } from "../src/compat.ts";
 import { displayText } from "../src/display.ts";
 import { describeError, getMessages, isLanguage, type Language } from "../src/i18n.ts";
 import { loadLanguage, saveLanguage } from "../src/language.ts";
 
 export default function cdWorkspaceExtension(pi: ExtensionAPI) {
+  if (!isSupportedPiVersion(VERSION)) throw new Error("pi-cd-workspace requires Pi >=1.7.0 (stable)");
   let commands: DirectoryCommands | undefined;
   let language: Language = "zh", agentDir = "";
   let generation = 0, languageGeneration = 0;

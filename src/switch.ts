@@ -27,7 +27,7 @@ export function requireIdle(ctx: Pick<WorkspaceCommandContext, "isIdle" | "hasPe
   return ctx.isIdle() && !ctx.hasPendingMessages() && !ctx.isBashRunning?.();
 }
 
-// Pi 1.4.0 的只读类型未暴露这两个查询，但实际提供的是 SessionManager。
+// 公开的只读会话接口不包含存储状态查询；访问前确认宿主提供所需方法。
 export function persistentManager(ctx: Pick<ExtensionContext, "sessionManager">): SessionManager {
   const manager = ctx.sessionManager as SessionManager;
   if (typeof manager.isPersisted !== "function" || typeof manager.usesDefaultSessionDir !== "function"
